@@ -1,3 +1,4 @@
+use crate::decoders::decode_subject;
 use anyhow::Result;
 use base64::{Engine as _, engine::general_purpose};
 use native_tls::TlsConnector;
@@ -88,7 +89,8 @@ fn dump_inbox(
     for msg in messages.iter() {
         if let Some(env) = msg.envelope() {
             if let Some(subject_b) = env.subject {
-                println!("Subject: {}", String::from_utf8_lossy(subject_b));
+                let pretty = decode_subject(subject_b);
+                println!("Subject: {}", pretty);
             } else {
                 println!("Subject: (none)");
             }

@@ -1,12 +1,15 @@
 mod config;
+mod decoders;
 mod imapsession;
 mod oauth;
+mod terminal;
 mod token_store;
 mod tokens_file;
 
 use anyhow::{Result, anyhow};
 use std::io::Read;
 use std::time::{SystemTime, UNIX_EPOCH};
+use terminal::run_terminal;
 
 fn main() -> Result<()> {
     env_logger::init();
@@ -193,5 +196,6 @@ fn main() -> Result<()> {
     // Use the access token to authenticate to IMAP via XOAUTH2
     imapsession::list_recent_subjects(&imap_server, &user_email, &tokens.access_token)?;
 
+    let _ = run_terminal();
     Ok(())
 }
