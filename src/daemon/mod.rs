@@ -2,9 +2,11 @@
 pub mod notifier;
 
 use anyhow::{Result, anyhow};
+use imap::extensions::idle::WaitOutcome;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
+    mpsc,
 };
 use std::thread;
 use std::time::{Duration, Instant};
@@ -23,8 +25,8 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 
 pub struct DaemonConfig {
-    pub interval_secs: u64,
-    pub keep_recent: usize,
+    pub interval_secs: u64,  // fallback poll interval
+    pub keep_recent: usize,  // db prune
     pub pages_to_fetch: u32, // how many pages of 20 to cache each cycle
 }
 
@@ -54,25 +56,49 @@ pub fn run_daemon(
 
     let notifier = Notifier::new()?;
 
-    // Main loop
+    // IDLE wake channel
+    let (idle_tx, idle_rx) = mpsc::channel::<()>();
+
+    // Spawn IDLE watcher thread (best-effort)
+    {
+        let imap_owned = (*imap).clone();
+        let token_owned = (*token_mgr).clone();
+        let running2 = running.clone();
+
+        thread::spawn(move || {
+            idle_watch_loop(imap_owned, token_owned, running2, idle_tx);
+        });
+    }
+
+    // Main loop:
+    // - service IPC continuously
+    // - run poll cycle on schedule OR immediately when IDLE says "mailbox changed"
     let mut next_run = Instant::now();
 
     while running.load(Ordering::SeqCst) {
-        // always service IPC first
+        // IPC
         #[cfg(unix)]
         drain_ipc(&listener, repo, imap, token_mgr, &cfg);
 
-        // run cycle if we’re at/after schedule
+        // If IDLE fired, run immediately (drain all queued events)
+        let mut idle_fired = false;
+        while idle_rx.try_recv().is_ok() {
+            idle_fired = true;
+        }
+        if idle_fired {
+            next_run = Instant::now();
+        }
+
+        // Scheduled cycle
         let now = Instant::now();
         if now >= next_run {
             if let Err(e) = do_poll_cycle(repo, imap, token_mgr, &cfg, &notifier) {
                 eprintln!("Daemon cycle error: {e}");
             }
-            next_run = now + Duration::from_secs(cfg.interval_secs);
+            next_run = now + Duration::from_secs(cfg.interval_secs.max(5)); // keep a sane fallback
         }
 
-        // small sleep to avoid busy loop + keep IPC responsive
-        thread::sleep(Duration::from_millis(200));
+        thread::sleep(Duration::from_millis(150));
     }
 
     // Cleanup socket on exit
@@ -82,6 +108,81 @@ pub fn run_daemon(
     }
 
     Ok(())
+}
+
+/// IMAP IDLE watcher.
+/// When it detects mailbox change, it sends a wake signal to the daemon loop.
+fn idle_watch_loop(
+    imap: ImapClient,
+    token_mgr: TokenManager,
+    running: Arc<AtomicBool>,
+    tx: mpsc::Sender<()>,
+) {
+    // We intentionally keep this “forever loop” resilient:
+    // any error -> short sleep -> reconnect.
+    while running.load(Ordering::SeqCst) {
+        let access = match token_mgr.get_access_token() {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("IDLE: token error: {e}");
+                sleep_small(&running);
+                continue;
+            }
+        };
+
+        let mut session = match imap.connect_authenticated(&access) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("IDLE: connect/auth error: {e}");
+                sleep_small(&running);
+                continue;
+            }
+        };
+
+        if let Err(e) = session.select("INBOX") {
+            eprintln!("IDLE: select INBOX error: {e}");
+            let _ = session.logout();
+            sleep_small(&running);
+            continue;
+        }
+
+        // Loop inside a connected session
+        while running.load(Ordering::SeqCst) {
+            // IMPORTANT: some servers want you to periodically leave IDLE.
+            // We wait with a timeout and re-enter.
+            match session.idle() {
+                Ok(idle) => match idle.wait_with_timeout(Duration::from_secs(60)) {
+                    Ok(WaitOutcome::MailboxChanged) => {
+                        let _ = tx.send(());
+                    }
+                    Ok(WaitOutcome::TimedOut) => {
+                        // just loop again so we can check `running` and keep the connection fresh
+                    }
+                    Err(e) => {
+                        eprintln!("IDLE: wait error: {e}");
+                        break; // break inner loop -> reconnect
+                    }
+                },
+                Err(e) => {
+                    eprintln!("IDLE: idle() error: {e}");
+                    break; // break inner loop -> reconnect
+                }
+            }
+        }
+
+        let _ = session.logout();
+        sleep_small(&running);
+    }
+}
+
+fn sleep_small(running: &Arc<AtomicBool>) {
+    // sleep in short chunks so shutdown is responsive
+    for _ in 0..10 {
+        if !running.load(Ordering::SeqCst) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
 }
 
 fn do_poll_cycle(
@@ -103,9 +204,7 @@ fn do_poll_cycle(
                 }
                 all_summaries.append(&mut items);
             }
-            Err(e) => {
-                return Err(anyhow!("IMAP fetch_page error: {e}"));
-            }
+            Err(e) => return Err(anyhow!("IMAP fetch_page error: {e}")),
         }
     }
 
@@ -135,10 +234,9 @@ fn do_poll_cycle(
 
     // Notifications: only notify items newer than last_seen_uid
     let max_uid = all_summaries.iter().map(|x| x.id).max().unwrap_or(0);
-
     let last_seen = repo.get_meta_i64("last_seen_uid")?.unwrap_or(0) as u32;
 
-    // On very first run, avoid notifying the whole mailbox: just set marker.
+    // On first run, don't spam: just set marker.
     if last_seen == 0 {
         repo.set_meta_i64("last_seen_uid", max_uid as i64)?;
         return Ok(());
@@ -154,7 +252,6 @@ fn do_poll_cycle(
     new_items.dedup_by(|a, b| a.id == b.id);
 
     for it in new_items {
-        // best-effort: if notifications fail, keep daemon running
         if let Err(e) = notifier.notify_email(&it) {
             eprintln!("Notify error for UID {}: {e}", it.id);
         }

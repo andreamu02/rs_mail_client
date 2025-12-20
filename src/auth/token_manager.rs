@@ -4,6 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::auth::{oauth, token_store, tokens_file};
 use crate::config::Config;
 
+#[derive(Clone)]
 pub struct TokenManager {
     pub client_id: String,
     pub client_secret: Option<String>,
@@ -50,18 +51,16 @@ impl TokenManager {
             }
         }
 
-        // 2) refresh token exists
-        if let Some(rt) = refresh_token.clone() {
+        // 2) refresh if possible
+        if let Some(rt) = refresh_token {
             let t =
                 oauth::refresh_access_token(&self.client_id, self.client_secret.as_deref(), &rt)?;
-            self.persist_tokens(&t)?;
-            if let Some(new_rt) = &t.refresh_token {
-                let _ = token_store::save_refresh_token(&self.user_email, new_rt);
-            }
+            let exp = t.expires_in.map(|s| now + s as i64).unwrap_or(now + 3500);
+            tokens_file::save_tokens(Some(&t.access_token), Some(exp))?;
             return Ok(t.access_token);
         }
 
-        // 3) interactive PKCE
+        // 3) otherwise PKCE
         let t = oauth::perform_pkce_flow(
             &self.client_id,
             self.client_secret.as_deref(),
@@ -69,25 +68,9 @@ impl TokenManager {
             "https://mail.google.com/",
             &self.user_email,
         )?;
-        self.persist_tokens(&t)?;
-        if let Some(new_rt) = &t.refresh_token {
-            let _ = token_store::save_refresh_token(&self.user_email, new_rt);
-        }
+
+        let exp = t.expires_in.map(|s| now + s as i64).unwrap_or(now + 3500);
+        tokens_file::save_tokens(Some(&t.access_token), Some(exp))?;
         Ok(t.access_token)
-    }
-
-    fn persist_tokens(&self, t: &oauth::Tokens) -> Result<()> {
-        let now_s = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time before unix epoch")
-            .as_secs() as i64;
-
-        if let Some(expires_in) = t.expires_in {
-            let expiry_epoch = now_s + expires_in as i64;
-            let _ = tokens_file::save_tokens(Some(&t.access_token), Some(expiry_epoch));
-        } else {
-            let _ = tokens_file::save_tokens(Some(&t.access_token), None);
-        }
-        Ok(())
     }
 }
