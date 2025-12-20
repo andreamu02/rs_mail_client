@@ -1,9 +1,9 @@
+use crate::domain::email::{EmailBody, EmailId, EmailSummary};
+use crate::mail::decoders::{decode_mime_words, decode_subject, normalize_snippet};
 use anyhow::{Result, anyhow};
 use base64::{Engine as _, engine::general_purpose};
+use mailparse::MailHeaderMap;
 use native_tls::TlsConnector;
-
-use crate::domain::email::{EmailBody, EmailId, EmailSummary};
-use crate::mail::decoders::{decode_subject, normalize_snippet};
 
 /// Build canonical auth string as bytes.
 fn build_xoauth2_bytes(user: &str, access_token: &str) -> Vec<u8> {
@@ -76,18 +76,20 @@ impl ImapClient {
         page: u32,
         page_size: u32,
     ) -> Result<Vec<EmailSummary>> {
+        use mailparse::MailHeaderMap;
+
         let mut session = self.connect_and_auth(access_token)?;
         session.select("INBOX")?;
 
-        // Grab all UIDs (simple + reliable for paging).
-        // NOTE: On huge mailboxes, you can optimize later.
-        let mut uids = session.uid_search("ALL")?;
+        // Get all UIDs (unique) and sort
+        let mut uids: Vec<u32> = session.uid_search("ALL")?.into_iter().collect();
         if uids.is_empty() {
             session.logout()?;
             return Ok(vec![]);
         }
         uids.sort_unstable(); // ascending
 
+        // Compute slice for page
         let total = uids.len() as i64;
         let ps = page_size as i64;
         let p = page as i64;
@@ -100,44 +102,85 @@ impl ImapClient {
             return Ok(vec![]);
         }
 
-        let slice = &uids[start as usize..end as usize];
-        // for display we want newest first
-        let mut page_uids: Vec<u32> = slice.iter().copied().collect();
+        // UIDs for this page (newest-first)
+        let mut page_uids: Vec<u32> = uids[start as usize..end as usize].to_vec();
         page_uids.sort_unstable_by(|a, b| b.cmp(a));
+        page_uids.dedup(); // just in case
 
-        let uid_set = page_uids
-            .iter()
-            .map(|u| u.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
+        let mut out = Vec::with_capacity(page_uids.len());
 
-        // Fetch envelope + full RFC822 so we can parse plain text and snippet.
-        let fetches = session.uid_fetch(uid_set, "UID ENVELOPE RFC822")?;
+        for uid_u32 in page_uids {
+            let uid = uid_u32 as EmailId;
 
-        let mut out = Vec::new();
-        for f in fetches.iter() {
-            let uid = f.uid.ok_or_else(|| anyhow!("missing UID in fetch"))? as EmailId;
-            let subject = f
+            // Fetch THIS email only (more reliable than bulk)
+            let fetches = session.uid_fetch(uid.to_string(), "(UID ENVELOPE BODY.PEEK[])")?;
+            let f = match fetches.iter().next() {
+                Some(x) => x,
+                None => continue,
+            };
+
+            // Subject from ENVELOPE (fast path)
+            let mut subject = f
                 .envelope()
                 .and_then(|env| env.subject)
                 .map(decode_subject)
                 .unwrap_or_else(|| "(no subject)".to_string());
 
-            let raw = f.body().ok_or_else(|| anyhow!("missing RFC822 body"))?;
-            let (body_text, date_epoch) = extract_best_effort_body_and_date(raw);
+            // Body bytes (with a retry, but no warning unless retry fails too)
+            let mut raw_bytes: Option<Vec<u8>> = f.body().map(|b| b.to_vec());
+
+            if raw_bytes.is_none() {
+                let retry = session.uid_fetch(uid.to_string(), "(UID BODY.PEEK[])")?;
+                if let Some(b2) = retry.iter().next().and_then(|rf| rf.body()) {
+                    raw_bytes = Some(b2.to_vec());
+                }
+            }
+
+            // Now use raw_bytes safely
+            let (body_text, date_epoch) = if let Some(ref bytes) = raw_bytes {
+                // subject fallback from headers if needed
+                if subject == "(no subject)"
+                    && let Ok(pm) = mailparse::parse_mail(bytes)
+                    && let Some(s) = pm.headers.get_first_value("Subject")
+                {
+                    let s = s.trim();
+                    if !s.is_empty() {
+                        subject = s.to_string();
+                    }
+                }
+
+                extract_best_effort_body_and_date(bytes)
+            } else {
+                // only warn if retry ALSO failed
+                eprintln!(
+                    "WARN: UID {} missing body even after retry; using empty snippet",
+                    uid
+                );
+                ("".to_string(), 0)
+            };
 
             let snippet = normalize_snippet(&body_text, 140);
+            let from_name = f
+                .envelope()
+                .and_then(|env| env.from.as_ref())
+                .and_then(|froms| froms.first())
+                .and_then(|addr| {
+                    // Prefer display name; if missing, use mailbox (without host).
+                    addr.name.as_deref().or(addr.mailbox.as_deref())
+                })
+                .map(decode_mime_words)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "(unknown)".to_string());
 
             out.push(EmailSummary {
                 id: uid,
+                from_name,
                 subject,
                 snippet,
                 date_epoch,
             });
         }
-
-        // Ensure sorted newest-first (UID desc) even if server returns different order
-        out.sort_by(|a, b| b.id.cmp(&a.id));
 
         session.logout()?;
         Ok(out)
@@ -147,15 +190,37 @@ impl ImapClient {
         let mut session = self.connect_and_auth(access_token)?;
         session.select("INBOX")?;
 
-        let fetches = session.uid_fetch(id.to_string(), "UID RFC822")?;
+        let fetches = session.uid_fetch(id.to_string(), "(UID BODY.PEEK[])")?;
         let f = fetches
             .iter()
             .next()
             .ok_or_else(|| anyhow!("email UID {id} not found"))?;
-        let raw = f.body().ok_or_else(|| anyhow!("missing RFC822 body"))?;
 
-        let (body_text, _date_epoch) = extract_best_effort_body_and_date(raw);
+        if let Some(raw) = f.body() {
+            let (body_text, _date_epoch) = extract_best_effort_body_and_date(raw);
+            session.logout()?;
+            return Ok(EmailBody {
+                id,
+                body: body_text,
+            });
+        }
 
+        // Retry once
+        eprintln!(
+            "WARN: UID {} missing body on first fetch_body; retrying once",
+            id
+        );
+        let retry = session.uid_fetch(id.to_string(), "(UID BODY.PEEK[])")?;
+        let f2 = retry
+            .iter()
+            .next()
+            .ok_or_else(|| anyhow!("email UID {id} not found on retry"))?;
+
+        let raw2 = f2
+            .body()
+            .ok_or_else(|| anyhow!("UID {}: missing body even after retry", id))?;
+
+        let (body_text, _date_epoch) = extract_best_effort_body_and_date(raw2);
         session.logout()?;
         Ok(EmailBody {
             id,
@@ -201,10 +266,10 @@ fn extract_text_part(p: &mailparse::ParsedMail) -> Option<String> {
     }
 
     // fallback to text/html if no plain found
-    if mime == "text/html" {
-        if let Ok(html) = p.get_body() {
-            return Some(strip_html_minimal(&html));
-        }
+    if mime == "text/html"
+        && let Ok(html) = p.get_body()
+    {
+        return Some(strip_html_minimal(&html));
     }
 
     None

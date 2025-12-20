@@ -6,7 +6,7 @@ use rs_mail_client::config::{load_config, resolve_db_path};
 use rs_mail_client::daemon::{DaemonConfig, run_daemon};
 use rs_mail_client::mail::imap_client::ImapClient;
 use rs_mail_client::store::sqlite::SqliteRepo;
-use rs_mail_client::tui::run_tui;
+use rs_mail_client::terminal::run_tui;
 
 #[derive(Parser)]
 #[command(name = "rs_mail_client")]
@@ -27,7 +27,7 @@ enum Command {
 
     /// Run the daemon: fetch/store/prune/notify
     Daemon {
-        #[arg(long, default_value_t = 60)]
+        #[arg(long, default_value_t = 5)]
         interval: u64,
 
         #[arg(long, default_value_t = 200)]

@@ -1,3 +1,4 @@
+// src/terminal/mod.rs
 pub mod events;
 pub mod state;
 pub mod ui;
@@ -20,11 +21,10 @@ pub fn run_tui(repo: &dyn MailRepository, open_id: Option<u32>) -> Result<()> {
     let mut state = AppState::new();
     state.reload_page(repo)?;
 
-    if let Some(id) = open_id {
-        state.try_select_id(id);
-        state.load_selected_body(repo)?;
-    } else {
-        state.load_selected_body(repo)?;
+    // Default: ListOnly mode (no email opened) until user presses Enter.
+    // If launched from a notification (tui --open <uid>), open that email directly.
+    if let Some(uid) = open_id {
+        state.open_uid(repo, uid)?;
     }
 
     enable_raw_mode()?;
@@ -35,7 +35,7 @@ pub fn run_tui(repo: &dyn MailRepository, open_id: Option<u32>) -> Result<()> {
 
     let res = (|| -> Result<()> {
         loop {
-            terminal.draw(|f| render(f, &state))?;
+            terminal.draw(|f| render(f, &mut state))?;
 
             if event::poll(Duration::from_millis(250))? {
                 match event::read()? {

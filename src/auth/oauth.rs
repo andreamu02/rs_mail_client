@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use tiny_http::{Response, Server};
 use url::Url;
 
-use crate::token_store;
+use crate::auth::token_store;
 
 /// Tokens returned by the oauth flow (in-memory)
 pub struct Tokens {

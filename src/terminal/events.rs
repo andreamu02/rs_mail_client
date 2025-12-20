@@ -1,33 +1,45 @@
 use anyhow::Result;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::store::repo::MailRepository;
-use crate::terminal::state::{AppState, Focus};
+use crate::terminal::state::{AppState, Focus, ViewMode};
 
 pub fn handle_key(key: KeyEvent, state: &mut AppState, repo: &dyn MailRepository) -> Result<bool> {
     match key.code {
-        KeyCode::Char('q') | KeyCode::Esc => return Ok(true),
+        KeyCode::Char('q') => return Ok(true),
+
+        KeyCode::Esc => {
+            if state.mode == ViewMode::Split {
+                state.close_email();
+                return Ok(false);
+            }
+            return Ok(true);
+        }
+
+        KeyCode::Enter => {
+            // Only open on Enter
+            state.open_selected(repo)?;
+            return Ok(false);
+        }
 
         KeyCode::Tab => {
             state.toggle_focus();
             return Ok(false);
         }
 
-        KeyCode::Enter => {
-            // Enter toggles focus and loads body (if needed)
-            state.toggle_focus();
-            state.load_selected_body(repo)?;
-            return Ok(false);
-        }
-
-        KeyCode::Char('r') if key.modifiers.is_empty() => {
+        KeyCode::Char('r') => {
             state.page_next(repo)?;
-            return Ok(false);
-        }
-
-        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::SHIFT) => {
-            // Shift+r => 'R'
-            state.page_prev(repo)?;
+            // If not cached, ask daemon to sync this page and reload
+            if state.items.is_empty() {
+                #[cfg(unix)]
+                {
+                    let _ = crate::ipc::send(&crate::ipc::Request::SyncPage {
+                        page: state.page,
+                        page_size: state.page_size,
+                    });
+                }
+                state.reload_page(repo)?;
+            }
             return Ok(false);
         }
 
@@ -40,37 +52,19 @@ pub fn handle_key(key: KeyEvent, state: &mut AppState, repo: &dyn MailRepository
     }
 
     match state.focus {
-        Focus::List => handle_list_keys(key, state, repo),
+        Focus::List => handle_list_keys(key, state),
         Focus::Body => handle_body_keys(key, state),
     }
 }
 
-fn handle_list_keys(
-    key: KeyEvent,
-    state: &mut AppState,
-    repo: &dyn MailRepository,
-) -> Result<bool> {
+fn handle_list_keys(key: KeyEvent, state: &mut AppState) -> Result<bool> {
     match key.code {
-        KeyCode::Down | KeyCode::Char('j') => {
-            state.move_selection(1);
-            state.load_selected_body(repo)?;
-        }
-        KeyCode::Up | KeyCode::Char('k') => {
-            state.move_selection(-1);
-            state.load_selected_body(repo)?;
-        }
-        KeyCode::Home => {
-            state.list_state.select(Some(0));
-            state.selected_id = state.current_selected_id();
-            state.body_scroll = 0;
-            state.load_selected_body(repo)?;
-        }
+        KeyCode::Down | KeyCode::Char('j') => state.move_selection(1),
+        KeyCode::Up | KeyCode::Char('k') => state.move_selection(-1),
+        KeyCode::Home => state.list_state.select(Some(0)),
         KeyCode::End => {
             if !state.items.is_empty() {
                 state.list_state.select(Some(state.items.len() - 1));
-                state.selected_id = state.current_selected_id();
-                state.body_scroll = 0;
-                state.load_selected_body(repo)?;
             }
         }
         _ => {}
@@ -79,6 +73,9 @@ fn handle_list_keys(
 }
 
 fn handle_body_keys(key: KeyEvent, state: &mut AppState) -> Result<bool> {
+    if state.mode != ViewMode::Split {
+        return Ok(false);
+    }
     match key.code {
         KeyCode::Down | KeyCode::Char('j') => state.scroll_body(1),
         KeyCode::Up | KeyCode::Char('k') => state.scroll_body(-1),

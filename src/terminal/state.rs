@@ -10,6 +10,12 @@ pub enum Focus {
     Body,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewMode {
+    ListOnly,
+    Split,
+}
+
 pub struct AppState {
     pub page: u32,
     pub page_size: u32,
@@ -17,11 +23,13 @@ pub struct AppState {
     pub items: Vec<EmailSummary>,
     pub list_state: ListState,
 
-    pub selected_id: Option<EmailId>,
+    /// The email currently opened in the right panel (only when Split)
+    pub opened_id: Option<EmailId>,
     pub body: Option<EmailBody>,
     pub body_scroll: u16,
 
     pub focus: Focus,
+    pub mode: ViewMode,
 }
 
 impl AppState {
@@ -31,10 +39,11 @@ impl AppState {
             page_size: 20,
             items: vec![],
             list_state: ListState::default(),
-            selected_id: None,
+            opened_id: None,
             body: None,
             body_scroll: 0,
             focus: Focus::List,
+            mode: ViewMode::ListOnly,
         };
         s.list_state.select(Some(0));
         s
@@ -44,13 +53,8 @@ impl AppState {
         self.items = repo.list_page(self.page, self.page_size)?;
         if self.items.is_empty() {
             self.list_state.select(None);
-            self.selected_id = None;
-        } else {
-            // keep existing selection if possible
-            if self.list_state.selected().is_none() {
-                self.list_state.select(Some(0));
-            }
-            self.selected_id = self.current_selected_id();
+        } else if self.list_state.selected().is_none() {
+            self.list_state.select(Some(0));
         }
         Ok(())
     }
@@ -63,34 +67,77 @@ impl AppState {
     pub fn try_select_id(&mut self, id: EmailId) {
         if let Some(pos) = self.items.iter().position(|x| x.id == id) {
             self.list_state.select(Some(pos));
-            self.selected_id = Some(id);
-            self.body_scroll = 0;
         }
     }
 
     pub fn move_selection(&mut self, delta: i32) {
         if self.items.is_empty() {
             self.list_state.select(None);
-            self.selected_id = None;
             return;
         }
-
         let cur = self.list_state.selected().unwrap_or(0) as i32;
         let len = self.items.len() as i32;
         let next = (cur + delta).clamp(0, len - 1) as usize;
-
         self.list_state.select(Some(next));
-        self.selected_id = self.current_selected_id();
-        self.body_scroll = 0;
+        // IMPORTANT: do NOT load body here (you only want to open on Enter)
     }
 
-    pub fn load_selected_body(&mut self, repo: &dyn MailRepository) -> Result<()> {
+    pub fn open_selected(&mut self, repo: &dyn MailRepository) -> Result<()> {
+        self.mode = ViewMode::Split;
+        self.focus = Focus::Body;
+        self.body_scroll = 0;
+
+        self.opened_id = self.current_selected_id();
         self.body = None;
-        if let Some(id) = self.current_selected_id() {
-            self.selected_id = Some(id);
+
+        if let Some(id) = self.opened_id {
             self.body = repo.get_body(id)?;
         }
         Ok(())
+    }
+
+    pub fn open_uid(&mut self, repo: &dyn MailRepository, id: EmailId) -> Result<()> {
+        // Used by notification click: open directly
+        self.mode = ViewMode::Split;
+        self.focus = Focus::Body;
+        self.body_scroll = 0;
+
+        self.opened_id = Some(id);
+        self.body = repo.get_body(id)?;
+
+        // Try highlight it in list if present
+        self.try_select_id(id);
+
+        Ok(())
+    }
+
+    pub fn close_email(&mut self) {
+        self.mode = ViewMode::ListOnly;
+        self.focus = Focus::List;
+        self.opened_id = None;
+        self.body = None;
+        self.body_scroll = 0;
+    }
+
+    pub fn toggle_focus(&mut self) {
+        if self.mode != ViewMode::Split {
+            return;
+        }
+        self.focus = match self.focus {
+            Focus::List => Focus::Body,
+            Focus::Body => Focus::List,
+        };
+    }
+
+    pub fn scroll_body(&mut self, delta: i32) {
+        if self.mode != ViewMode::Split {
+            return;
+        }
+        if delta < 0 {
+            self.body_scroll = self.body_scroll.saturating_sub((-delta) as u16);
+        } else {
+            self.body_scroll = self.body_scroll.saturating_add(delta as u16);
+        }
     }
 
     pub fn page_next(&mut self, repo: &dyn MailRepository) -> Result<()> {
@@ -98,10 +145,7 @@ impl AppState {
         self.reload_page(repo)?;
         if !self.items.is_empty() {
             self.list_state.select(Some(0));
-            self.selected_id = self.current_selected_id();
         }
-        self.body_scroll = 0;
-        self.load_selected_body(repo)?;
         Ok(())
     }
 
@@ -112,29 +156,8 @@ impl AppState {
         self.page -= 1;
         self.reload_page(repo)?;
         if !self.items.is_empty() {
-            // nice UX: land at bottom item when going back
-            let last = self.items.len().saturating_sub(1);
-            self.list_state.select(Some(last));
-            self.selected_id = self.current_selected_id();
+            self.list_state.select(Some(self.items.len() - 1));
         }
-        self.body_scroll = 0;
-        self.load_selected_body(repo)?;
         Ok(())
-    }
-
-    pub fn scroll_body(&mut self, delta: i32) {
-        if delta < 0 {
-            let d = (-delta) as u16;
-            self.body_scroll = self.body_scroll.saturating_sub(d);
-        } else {
-            self.body_scroll = self.body_scroll.saturating_add(delta as u16);
-        }
-    }
-
-    pub fn toggle_focus(&mut self) {
-        self.focus = match self.focus {
-            Focus::List => Focus::Body,
-            Focus::Body => Focus::List,
-        };
     }
 }

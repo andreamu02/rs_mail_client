@@ -26,7 +26,7 @@ pub fn config_path() -> Result<PathBuf> {
 }
 
 pub fn default_db_path() -> Result<PathBuf> {
-    let mut p = add_dir()?;
+    let mut p = config_dir()?;
     fs::create_dir_all(&p)?;
     p.push("mail.db");
     Ok(p)
