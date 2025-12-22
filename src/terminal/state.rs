@@ -8,12 +8,16 @@ use crate::store::repo::MailRepository;
 pub enum Focus {
     List,
     Body,
+    Help,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ViewMode {
-    ListOnly,
-    Split,
+    #[default]
+    ListOnly = 0,
+    Split = 1,
+    Menu = 2,
+    Help = 3,
 }
 
 pub struct AppState {
@@ -30,6 +34,8 @@ pub struct AppState {
 
     pub focus: Focus,
     pub mode: ViewMode,
+    pub previous_focus: Option<Focus>,
+    pub previous: Option<ViewMode>,
 }
 
 impl AppState {
@@ -44,6 +50,8 @@ impl AppState {
             body_scroll: 0,
             focus: Focus::List,
             mode: ViewMode::ListOnly,
+            previous: None,
+            previous_focus: None,
         };
         s.list_state.select(Some(0));
         s
@@ -120,12 +128,17 @@ impl AppState {
     }
 
     pub fn toggle_focus(&mut self) {
+        if self.mode == ViewMode::Help {
+            self.focus = Focus::Help;
+            return;
+        }
         if self.mode != ViewMode::Split {
             return;
         }
         self.focus = match self.focus {
             Focus::List => Focus::Body,
             Focus::Body => Focus::List,
+            _ => self.focus,
         };
     }
 
@@ -159,5 +172,11 @@ impl AppState {
             self.list_state.select(Some(self.items.len() - 1));
         }
         Ok(())
+    }
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self::new()
     }
 }

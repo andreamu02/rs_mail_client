@@ -16,16 +16,43 @@ pub fn render(f: &mut Frame, state: &mut AppState) {
     match state.mode {
         ViewMode::ListOnly => render_list_only(f, main_area, state),
         ViewMode::Split => render_split(f, main_area, state),
+        ViewMode::Menu => render_menu(f, main_area, state),
+        ViewMode::Help => render_help(f, main_area, state),
     }
 
     render_footer(f, footer_area, state);
 }
 
 fn render_list_only(f: &mut Frame, area: Rect, state: &mut AppState) {
-    render_list(f, area, state, " Inbox  (Enter to open) ");
+    render_list(f, area, state, " inbox  (enter to open) ");
 }
 
 fn render_split(f: &mut Frame, area: Rect, state: &mut AppState) {
+    let [left, right] =
+        Layout::horizontal([Constraint::Percentage(36), Constraint::Percentage(64)])
+            .areas::<2>(area);
+
+    render_list(f, left, state, &format!(" Inbox (page {}) ", state.page));
+    render_email(f, right, state);
+}
+
+fn render_help(f: &mut Frame, area: Rect, state: &mut AppState) {
+    let block = Block::default()
+        .title(" Help ")
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Yellow))
+        .padding(Padding {
+            left: 0,
+            right: 2,
+            top: 0,
+            bottom: 0,
+        });
+
+    f.render_widget(block, area);
+}
+
+fn render_menu(f: &mut Frame, area: Rect, state: &mut AppState) {
     let [left, right] =
         Layout::horizontal([Constraint::Percentage(36), Constraint::Percentage(64)])
             .areas::<2>(area);
@@ -184,6 +211,8 @@ fn render_footer(f: &mut Frame, area: Rect, state: &AppState) {
     let hint = match state.mode {
         ViewMode::ListOnly => "j/k move  Enter open  r next20  R prev20  q quit",
         ViewMode::Split => "j/k move/scroll  Tab focus  Esc back  r next20  R prev20  q quit",
+        ViewMode::Menu => "m Menu",
+        ViewMode::Help => "h help",
     };
     f.render_widget(
         Paragraph::new(hint).style(Style::default().fg(Color::Gray)),

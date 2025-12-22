@@ -4,32 +4,70 @@ use crossterm::event::{KeyCode, KeyEvent};
 use crate::store::repo::MailRepository;
 use crate::terminal::state::{AppState, Focus, ViewMode};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum KeyDispatch {
+    Handled,
+    #[default]
+    Unhandled,
+    Quit,
+}
+
 pub fn handle_key(key: KeyEvent, state: &mut AppState, repo: &dyn MailRepository) -> Result<bool> {
+    let local = match state.focus {
+        Focus::List => handle_list_keys(key, state)?,
+        Focus::Body => handle_body_keys(key, state)?,
+        Focus::Help => handle_help_keys(key, state)?,
+    };
+
+    match local {
+        KeyDispatch::Quit => return Ok(true),
+        KeyDispatch::Handled => return Ok(false),
+        KeyDispatch::Unhandled => {}
+    }
+
+    match handle_global_keys(key, state, repo)? {
+        KeyDispatch::Quit => Ok(true),
+        _ => Ok(false),
+    }
+}
+
+fn handle_global_keys(
+    key: KeyEvent,
+    state: &mut AppState,
+    repo: &dyn MailRepository,
+) -> Result<KeyDispatch> {
     match key.code {
-        KeyCode::Char('q') => return Ok(true),
+        KeyCode::Char('q') => Ok(KeyDispatch::Quit),
+
+        KeyCode::Char('h') => {
+            state.previous = Some(state.mode);
+            state.previous_focus = Some(state.focus);
+
+            state.mode = ViewMode::Help;
+            state.focus = Focus::Help; // explicit (no toggle)
+            Ok(KeyDispatch::Handled)
+        }
 
         KeyCode::Esc => {
             if state.mode == ViewMode::Split {
                 state.close_email();
-                return Ok(false);
+                return Ok(KeyDispatch::Handled);
             }
-            return Ok(true);
+            Ok(KeyDispatch::Unhandled)
         }
 
         KeyCode::Enter => {
-            // Only open on Enter
             state.open_selected(repo)?;
-            return Ok(false);
+            Ok(KeyDispatch::Handled)
         }
 
         KeyCode::Tab => {
             state.toggle_focus();
-            return Ok(false);
+            Ok(KeyDispatch::Handled)
         }
 
         KeyCode::Char('r') => {
             state.page_next(repo)?;
-            // If not cached, ask daemon to sync this page and reload
             if state.items.is_empty() {
                 #[cfg(unix)]
                 {
@@ -40,49 +78,82 @@ pub fn handle_key(key: KeyEvent, state: &mut AppState, repo: &dyn MailRepository
                 }
                 state.reload_page(repo)?;
             }
-            return Ok(false);
+            Ok(KeyDispatch::Handled)
         }
 
         KeyCode::Char('R') => {
             state.page_prev(repo)?;
-            return Ok(false);
+            Ok(KeyDispatch::Handled)
         }
 
-        _ => {}
-    }
-
-    match state.focus {
-        Focus::List => handle_list_keys(key, state),
-        Focus::Body => handle_body_keys(key, state),
+        _ => Ok(KeyDispatch::Unhandled),
     }
 }
 
-fn handle_list_keys(key: KeyEvent, state: &mut AppState) -> Result<bool> {
+fn handle_list_keys(key: KeyEvent, state: &mut AppState) -> Result<KeyDispatch> {
     match key.code {
-        KeyCode::Down | KeyCode::Char('j') => state.move_selection(1),
-        KeyCode::Up | KeyCode::Char('k') => state.move_selection(-1),
-        KeyCode::Home => state.list_state.select(Some(0)),
+        KeyCode::Down | KeyCode::Char('j') => {
+            state.move_selection(1);
+            Ok(KeyDispatch::Handled)
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            state.move_selection(-1);
+            Ok(KeyDispatch::Handled)
+        }
+        KeyCode::Home => {
+            state.list_state.select(Some(0));
+            Ok(KeyDispatch::Handled)
+        }
         KeyCode::End => {
             if !state.items.is_empty() {
                 state.list_state.select(Some(state.items.len() - 1));
             }
+            Ok(KeyDispatch::Handled)
         }
-        _ => {}
+        _ => Ok(KeyDispatch::Unhandled),
     }
-    Ok(false)
 }
 
-fn handle_body_keys(key: KeyEvent, state: &mut AppState) -> Result<bool> {
+fn handle_body_keys(key: KeyEvent, state: &mut AppState) -> Result<KeyDispatch> {
     if state.mode != ViewMode::Split {
-        return Ok(false);
+        return Ok(KeyDispatch::Unhandled);
     }
     match key.code {
-        KeyCode::Down | KeyCode::Char('j') => state.scroll_body(1),
-        KeyCode::Up | KeyCode::Char('k') => state.scroll_body(-1),
-        KeyCode::PageDown => state.scroll_body(10),
-        KeyCode::PageUp => state.scroll_body(-10),
-        KeyCode::Home => state.body_scroll = 0,
-        _ => {}
+        KeyCode::Down | KeyCode::Char('j') => {
+            state.scroll_body(1);
+            Ok(KeyDispatch::Handled)
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            state.scroll_body(-1);
+            Ok(KeyDispatch::Handled)
+        }
+        KeyCode::PageDown => {
+            state.scroll_body(10);
+            Ok(KeyDispatch::Handled)
+        }
+        KeyCode::PageUp => {
+            state.scroll_body(-10);
+            Ok(KeyDispatch::Handled)
+        }
+        KeyCode::Home => {
+            state.body_scroll = 0;
+            Ok(KeyDispatch::Handled)
+        }
+        _ => Ok(KeyDispatch::Unhandled),
     }
-    Ok(false)
+}
+
+fn handle_help_keys(key: KeyEvent, state: &mut AppState) -> Result<KeyDispatch> {
+    if state.mode != ViewMode::Help {
+        return Ok(KeyDispatch::Unhandled);
+    }
+
+    match key.code {
+        KeyCode::Char('h') | KeyCode::Char('q') | KeyCode::Esc => {
+            state.mode = state.previous.take().unwrap_or_default();
+            state.focus = state.previous_focus.take().unwrap_or(Focus::List);
+            Ok(KeyDispatch::Handled)
+        }
+        _ => Ok(KeyDispatch::Unhandled),
+    }
 }
