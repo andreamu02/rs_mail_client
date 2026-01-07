@@ -11,6 +11,7 @@ use std::os::unix::net::UnixStream;
 pub enum Request {
     Ping,
     SyncPage { page: u32, page_size: u32 },
+    FetchRaw { uid: u32 },
 }
 
 #[derive(Debug, Serialize, Deserialize)]

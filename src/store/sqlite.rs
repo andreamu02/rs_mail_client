@@ -38,6 +38,12 @@ impl SqliteRepo {
                 body        TEXT NOT NULL
             );
 
+            -- NEW: store raw RFC822 bytes (BODY.PEEK[])
+            CREATE TABLE IF NOT EXISTS raw_messages (
+                id          INTEGER PRIMARY KEY,
+                raw         BLOB NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS meta (
                 key   TEXT PRIMARY KEY,
                 value INTEGER NOT NULL
@@ -93,6 +99,32 @@ impl MailRepository for SqliteRepo {
         Ok(())
     }
 
+    fn upsert_raw(&self, id: EmailId, raw: &[u8]) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            r#"
+            INSERT INTO raw_messages (id, raw)
+            VALUES (?1, ?2)
+            ON CONFLICT(id) DO UPDATE SET
+              raw=excluded.raw
+            "#,
+            params![id, raw],
+        )?;
+        Ok(())
+    }
+
+    fn get_raw(&self, id: EmailId) -> Result<Option<Vec<u8>>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(r#"SELECT raw FROM raw_messages WHERE id=?1"#)?;
+        let mut rows = stmt.query(params![id])?;
+        if let Some(r) = rows.next()? {
+            let raw: Vec<u8> = r.get(0)?;
+            Ok(Some(raw))
+        } else {
+            Ok(None)
+        }
+    }
+
     fn list_page(&self, page: u32, page_size: u32) -> Result<Vec<EmailSummary>> {
         let limit = page_size as i64;
         let offset = (page as i64) * (page_size as i64);
@@ -124,7 +156,6 @@ impl MailRepository for SqliteRepo {
     fn get_body(&self, id: EmailId) -> Result<Option<EmailBody>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(r#"SELECT body FROM bodies WHERE id=?1"#)?;
-
         let mut rows = stmt.query(params![id])?;
         if let Some(r) = rows.next()? {
             let body: String = r.get(0)?;
@@ -139,7 +170,6 @@ impl MailRepository for SqliteRepo {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
 
-        // Keep only latest N emails by date_epoch/id
         tx.execute(
             r#"
             DELETE FROM emails
@@ -152,10 +182,17 @@ impl MailRepository for SqliteRepo {
             params![keep_i64],
         )?;
 
-        // Remove bodies that no longer have a summary
         tx.execute(
             r#"
             DELETE FROM bodies
+            WHERE id NOT IN (SELECT id FROM emails)
+            "#,
+            [],
+        )?;
+
+        tx.execute(
+            r#"
+            DELETE FROM raw_messages
             WHERE id NOT IN (SELECT id FROM emails)
             "#,
             [],

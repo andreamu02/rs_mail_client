@@ -44,7 +44,7 @@ fn handle_global_keys(
             state.previous_focus = Some(state.focus);
 
             state.mode = ViewMode::Help;
-            state.focus = Focus::Help; // explicit (no toggle)
+            state.focus = Focus::Help;
             Ok(KeyDispatch::Handled)
         }
 
@@ -63,6 +63,11 @@ fn handle_global_keys(
 
         KeyCode::Tab => {
             state.toggle_focus();
+            Ok(KeyDispatch::Handled)
+        }
+
+        KeyCode::Char('i') => {
+            state.toggle_images(repo)?;
             Ok(KeyDispatch::Handled)
         }
 

@@ -1,5 +1,6 @@
 // src/terminal/mod.rs
 pub mod events;
+pub mod images;
 pub mod state;
 pub mod ui;
 
@@ -10,6 +11,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
+use ratatui_image::FontSize;
 use std::{io, time::Duration};
 
 use crate::store::repo::MailRepository;
@@ -21,8 +23,7 @@ pub fn run_tui(repo: &dyn MailRepository, open_id: Option<u32>) -> Result<()> {
     let mut state = AppState::new();
     state.reload_page(repo)?;
 
-    // Default: ListOnly mode (no email opened) until user presses Enter.
-    // If launched from a notification (tui --open <uid>), open that email directly.
+    // Default: ListOnly mode until user presses Enter.
     if let Some(uid) = open_id {
         state.open_uid(repo, uid)?;
     }
@@ -33,19 +34,23 @@ pub fn run_tui(repo: &dyn MailRepository, open_id: Option<u32>) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
+    // ratatui-image picker (kitty/sixel/etc)
+    let picker = ratatui_image::picker::Picker::from_query_stdio()
+        .unwrap_or_else(|_| ratatui_image::picker::Picker::from_fontsize((8u16, 16u16)));
+    state.img_picker = Some(picker);
+
     let res = (|| -> Result<()> {
         loop {
             terminal.draw(|f| render(f, &mut state))?;
 
-            if event::poll(Duration::from_millis(250))? {
-                match event::read()? {
-                    Event::Key(k) => {
-                        if handle_key(k, &mut state, repo)? {
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
+            if !event::poll(Duration::from_millis(250))? {
+                continue;
+            }
+            let Event::Key(k) = event::read()? else {
+                continue;
+            };
+            if handle_key(k, &mut state, repo)? {
+                break;
             }
         }
         Ok(())

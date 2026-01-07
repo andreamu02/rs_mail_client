@@ -322,6 +322,37 @@ fn handle_ipc_request(
                 message: Some(format!("synced page {page}")),
             }
         }
+
+        Request::FetchRaw { uid } => {
+            let access = match token_mgr.get_access_token() {
+                Ok(t) => t,
+                Err(e) => {
+                    return Response {
+                        ok: false,
+                        message: Some(format!("token error: {e}")),
+                    };
+                }
+            };
+
+            match imap.fetch_raw(&access, uid) {
+                Ok(raw) => {
+                    if let Err(e) = repo.upsert_raw(uid, &raw) {
+                        return Response {
+                            ok: false,
+                            message: Some(format!("store error: {e}")),
+                        };
+                    }
+                    Response {
+                        ok: true,
+                        message: Some(format!("raw saved for UID {uid}")),
+                    }
+                }
+                Err(e) => Response {
+                    ok: false,
+                    message: Some(format!("imap error: {e}")),
+                },
+            }
+        }
     }
 }
 

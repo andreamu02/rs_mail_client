@@ -6,6 +6,7 @@ use std::path::PathBuf;
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     pub client_id: String,
+    pub client_secret: String,
     pub imap_server: Option<String>,
     pub user_email: Option<String>,
     pub redirect_uri: Option<String>,
@@ -38,6 +39,7 @@ pub fn load_config() -> Result<Config> {
         // create a template config for users to edit
         let sample = Config {
             client_id: "YOUR_CLIENT_ID.apps.googleusercontent.com".to_string(),
+            client_secret: "YOUR_CLIENT_SECRET".to_string(),
             imap_server: Some("imap.gmail.com".to_string()),
             user_email: Some("you@example.com".to_string()),
             redirect_uri: Some("http://127.0.0.1:8080/callback".to_string()),

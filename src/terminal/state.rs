@@ -1,5 +1,6 @@
 use anyhow::Result;
 use ratatui::widgets::ListState;
+use ratatui_image::{picker::Picker, protocol::StatefulProtocol};
 
 use crate::domain::email::{EmailBody, EmailId, EmailSummary};
 use crate::store::repo::MailRepository;
@@ -36,6 +37,11 @@ pub struct AppState {
     pub mode: ViewMode,
     pub previous_focus: Option<Focus>,
     pub previous: Option<ViewMode>,
+
+    // Images
+    pub show_images: bool,
+    pub img_picker: Option<Picker>,
+    pub img_state: Option<StatefulProtocol>,
 }
 
 impl AppState {
@@ -52,6 +58,9 @@ impl AppState {
             mode: ViewMode::ListOnly,
             previous: None,
             previous_focus: None,
+            show_images: false,
+            img_picker: None,
+            img_state: None,
         };
         s.list_state.select(Some(0));
         s
@@ -87,7 +96,7 @@ impl AppState {
         let len = self.items.len() as i32;
         let next = (cur + delta).clamp(0, len - 1) as usize;
         self.list_state.select(Some(next));
-        // IMPORTANT: do NOT load body here (you only want to open on Enter)
+        // IMPORTANT: do NOT load body here (only open on Enter)
     }
 
     pub fn open_selected(&mut self, repo: &dyn MailRepository) -> Result<()> {
@@ -97,24 +106,34 @@ impl AppState {
 
         self.opened_id = self.current_selected_id();
         self.body = None;
+        self.img_state = None;
 
         if let Some(id) = self.opened_id {
             self.body = repo.get_body(id)?;
         }
+
+        // If images are enabled, try to load image for this email too
+        if self.show_images {
+            let _ = self.load_image_for_opened(repo);
+        }
+
         Ok(())
     }
 
     pub fn open_uid(&mut self, repo: &dyn MailRepository, id: EmailId) -> Result<()> {
-        // Used by notification click: open directly
         self.mode = ViewMode::Split;
         self.focus = Focus::Body;
         self.body_scroll = 0;
 
         self.opened_id = Some(id);
         self.body = repo.get_body(id)?;
+        self.img_state = None;
 
-        // Try highlight it in list if present
         self.try_select_id(id);
+
+        if self.show_images {
+            let _ = self.load_image_for_opened(repo);
+        }
 
         Ok(())
     }
@@ -125,6 +144,7 @@ impl AppState {
         self.opened_id = None;
         self.body = None;
         self.body_scroll = 0;
+        self.img_state = None;
     }
 
     pub fn toggle_focus(&mut self) {
@@ -171,6 +191,59 @@ impl AppState {
         if !self.items.is_empty() {
             self.list_state.select(Some(self.items.len() - 1));
         }
+        Ok(())
+    }
+
+    // ----- Images -----
+
+    pub fn toggle_images(&mut self, repo: &dyn MailRepository) -> Result<()> {
+        self.show_images = !self.show_images;
+        self.img_state = None;
+
+        if !self.show_images {
+            return Ok(());
+        }
+
+        // only meaningful when an email is open
+        if self.mode != ViewMode::Split || self.opened_id.is_none() {
+            return Ok(());
+        }
+
+        self.load_image_for_opened(repo)
+    }
+
+    fn load_image_for_opened(&mut self, repo: &dyn MailRepository) -> Result<()> {
+        let Some(uid) = self.opened_id else {
+            return Ok(());
+        };
+        let Some(picker) = self.img_picker.as_mut() else {
+            return Ok(());
+        };
+
+        // 1) Try local cached raw bytes
+        let mut raw = repo.get_raw(uid)?;
+
+        // 2) If missing, ask daemon to fetch it
+        if raw.is_none() {
+            #[cfg(unix)]
+            {
+                let _ = crate::ipc::send(&crate::ipc::Request::FetchRaw { uid });
+                raw = repo.get_raw(uid)?;
+            }
+        }
+
+        let Some(raw) = raw else {
+            self.img_state = None;
+            return Ok(());
+        };
+
+        // 3) Extract first image and build protocol
+        if let Some(img) = crate::terminal::images::first_image_from_rfc822(&raw) {
+            self.img_state = Some(picker.new_resize_protocol(img));
+        } else {
+            self.img_state = None;
+        }
+
         Ok(())
     }
 }

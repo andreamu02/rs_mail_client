@@ -9,6 +9,10 @@ pub trait MailRepository: Send + Sync {
     fn list_page(&self, page: u32, page_size: u32) -> Result<Vec<EmailSummary>>;
     fn get_body(&self, id: EmailId) -> Result<Option<EmailBody>>;
 
+    // NEW: raw RFC822 bytes (for images / attachments)
+    fn upsert_raw(&self, id: EmailId, raw: &[u8]) -> Result<()>;
+    fn get_raw(&self, id: EmailId) -> Result<Option<Vec<u8>>>;
+
     fn prune_keep_recent(&self, keep: usize) -> Result<()>;
 
     fn get_meta_i64(&self, key: &str) -> Result<Option<i64>>;

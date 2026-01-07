@@ -5,6 +5,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, BorderType, Borders, List, ListItem, Padding, Paragraph, Wrap},
 };
+use ratatui_image::StatefulImage;
 
 use crate::terminal::state::{AppState, Focus, ViewMode};
 
@@ -36,7 +37,7 @@ fn render_split(f: &mut Frame, area: Rect, state: &mut AppState) {
     render_email(f, right, state);
 }
 
-fn render_help(f: &mut Frame, area: Rect, state: &mut AppState) {
+fn render_help(f: &mut Frame, area: Rect, _state: &mut AppState) {
     let block = Block::default()
         .title(" Help ")
         .borders(Borders::ALL)
@@ -88,7 +89,6 @@ fn render_list(f: &mut Frame, area: Rect, state: &mut AppState, title: &str) {
         .enumerate()
         .map(|(i, e)| {
             let is_sel = Some(i) == selected;
-
             let prefix = if is_sel { "▶ " } else { "  " };
 
             let top = Line::from(vec![
@@ -125,23 +125,19 @@ fn render_list(f: &mut Frame, area: Rect, state: &mut AppState, title: &str) {
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
 
-            let base_style = Style::default();
-
             ListItem::new(Text::from(vec![top, bottom])).style(if is_sel {
                 sel_style
             } else {
-                base_style
+                Style::default()
             })
         })
         .collect();
 
-    // We set highlight_symbol to "" because we style rows ourselves
     let list = List::new(items).block(block);
-
     f.render_stateful_widget(list, area, &mut state.list_state);
 }
 
-fn render_email(f: &mut Frame, area: Rect, state: &AppState) {
+fn render_email(f: &mut Frame, area: Rect, state: &mut AppState) {
     let border_color = if state.focus == Focus::Body {
         Color::Yellow
     } else {
@@ -158,10 +154,23 @@ fn render_email(f: &mut Frame, area: Rect, state: &AppState) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let [meta_area, body_area] =
-        Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas::<2>(inner);
-
     let (from_name, subject) = opened_email_meta(state);
+
+    // If showing images, reserve some space for them.
+    // Otherwise the body uses the full space.
+    let (meta_area, image_area, body_area) = if state.show_images {
+        let [m, i, b] = Layout::vertical([
+            Constraint::Length(2),
+            Constraint::Length(14),
+            Constraint::Min(0),
+        ])
+        .areas::<3>(inner);
+        (m, Some(i), b)
+    } else {
+        let [m, b] =
+            Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas::<2>(inner);
+        (m, None, b)
+    };
 
     let meta = Text::from(vec![
         Line::from(vec![
@@ -178,8 +187,21 @@ fn render_email(f: &mut Frame, area: Rect, state: &AppState) {
             Span::styled(subject, Style::default().add_modifier(Modifier::BOLD)),
         ]),
     ]);
-
     f.render_widget(Paragraph::new(meta), meta_area);
+
+    // Render image (if any)
+    if let Some(img_area) = image_area {
+        if let Some(img) = state.img_state.as_mut() {
+            let widget = StatefulImage::default();
+            f.render_stateful_widget(widget, img_area, img);
+            let _ = img.last_encoding_result(); // ignore transient encoding errors
+        } else {
+            let hint = Paragraph::new("No image (press i to toggle, or email has no image parts).")
+                .style(Style::default().fg(Color::DarkGray))
+                .wrap(Wrap { trim: false });
+            f.render_widget(hint, img_area);
+        }
+    }
 
     let body_text = match &state.body {
         Some(b) => b.body.clone(),
@@ -209,8 +231,10 @@ fn opened_email_meta(state: &AppState) -> (String, String) {
 
 fn render_footer(f: &mut Frame, area: Rect, state: &AppState) {
     let hint = match state.mode {
-        ViewMode::ListOnly => "j/k move  Enter open  r next20  R prev20  q quit",
-        ViewMode::Split => "j/k move/scroll  Tab focus  Esc back  r next20  R prev20  q quit",
+        ViewMode::ListOnly => "j/k move  Enter open  r next20  R prev20  i images  q quit",
+        ViewMode::Split => {
+            "j/k move/scroll  Tab focus  Esc back  r next20  R prev20  i images  q quit"
+        }
         ViewMode::Menu => "m Menu",
         ViewMode::Help => "h help",
     };
@@ -221,8 +245,6 @@ fn render_footer(f: &mut Frame, area: Rect, state: &AppState) {
 }
 
 /// Make bodies readable:
-/// - truncate absurd tracking-link lines
-/// - break long tokens so wrapping works
 fn format_body_for_tui(input: &str) -> String {
     let trimmed = trim_long_link_lines(input, 220);
     break_long_tokens(&trimmed, 70)

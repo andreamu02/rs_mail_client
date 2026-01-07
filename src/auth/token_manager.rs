@@ -44,10 +44,9 @@ impl TokenManager {
 
         // 1) cached & not expired
         if let Some(tf) = cached {
-            if let (Some(at), Some(exp)) = (tf.access_token, tf.expires_at_epoch) {
-                if now < exp {
-                    return Ok(at);
-                }
+            match (tf.access_token, tf.expires_at_epoch) {
+                (Some(at), Some(exp)) if now < exp => return Ok(at),
+                _ => (),
             }
         }
 

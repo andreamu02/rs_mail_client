@@ -137,7 +137,7 @@ impl ImapClient {
                 .and_then(|list| list.first())
                 .map(|addr| {
                     if let Some(name) = addr.name.as_ref() {
-                        let n = decode_mime_words(name.as_ref());
+                        let n = decode_mime_words(name);
                         if !n.trim().is_empty() {
                             return n;
                         }
@@ -146,11 +146,11 @@ impl ImapClient {
                     let mb = addr
                         .mailbox
                         .as_ref()
-                        .map(|b| String::from_utf8_lossy(b.as_ref()).to_string());
+                        .map(|b| String::from_utf8_lossy(b).to_string());
                     let host = addr
                         .host
                         .as_ref()
-                        .map(|b| String::from_utf8_lossy(b.as_ref()).to_string());
+                        .map(|b| String::from_utf8_lossy(b).to_string());
                     match (mb, host) {
                         (Some(m), Some(h)) => format!("{m}@{h}"),
                         (Some(m), None) => m,
@@ -199,7 +199,7 @@ impl ImapClient {
         let mut session = self.connect_and_auth(access_token)?;
         session.select("INBOX")?;
 
-        let uid = id as u32;
+        let uid = id;
 
         let fetches = session.uid_fetch(uid.to_string(), "(UID BODY.PEEK[])")?;
         let raw: Vec<u8> = if let Some(b) = fetches.iter().next().and_then(|f| f.body()) {
@@ -223,6 +223,30 @@ impl ImapClient {
             id,
             body: body_text,
         })
+    }
+
+    pub fn fetch_raw(&self, access_token: &str, id: EmailId) -> Result<Vec<u8>> {
+        let mut session = self.connect_and_auth(access_token)?;
+        session.select("INBOX")?;
+
+        let uid = id;
+
+        let fetches = session.uid_fetch(uid.to_string(), "(UID BODY.PEEK[])")?;
+        let raw: Vec<u8> = if let Some(b) = fetches.iter().next().and_then(|f| f.body()) {
+            b.to_vec()
+        } else {
+            eprintln!("WARN: UID {uid} missing body on first fetch; retrying once");
+            let retry = session.uid_fetch(uid.to_string(), "(UID BODY.PEEK[])")?;
+            retry
+                .iter()
+                .next()
+                .and_then(|rf| rf.body())
+                .map(|b| b.to_vec())
+                .ok_or_else(|| anyhow!("UID {uid}: missing raw even after retry"))?
+        };
+
+        let _ = session.logout();
+        Ok(raw)
     }
 }
 
@@ -259,13 +283,20 @@ fn extract_text_part(p: &mailparse::ParsedMail) -> Option<String> {
         }
     }
 
-    if mime == "text/html" {
-        if let Ok(html) = p.get_body() {
-            return Some(strip_html_minimal(&html));
-        }
+    if mime == "text/html"
+        && let Ok(html) = p.get_body()
+    {
+        return Some(html_to_text(&html));
     }
 
     None
+}
+
+fn html_to_text(html: &str) -> String {
+    match html2text::from_read(html.as_bytes(), 90) {
+        Ok(s) => s,
+        Err(_) => strip_html_minimal(html),
+    }
 }
 
 fn strip_html_minimal(html: &str) -> String {
